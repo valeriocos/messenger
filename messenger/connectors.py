@@ -31,8 +31,6 @@ from messenger.errors import ElasticError
 
 
 READ_DONE = "read_done"
-BULK_SIZE = 100
-ITEM_TYPE = 'item'
 
 
 class Connector:
@@ -106,11 +104,32 @@ class RedisConnector(Connector):
 
 class ESConnector(Connector):
 
-    def __init__(self, host, port, index, create=False):
+    BULK_SIZE = 100
+    ITEM_TYPE = 'item'
+    MAPPING_TEMPLATE = """
+    { 
+      "mappings": { 
+        "%s": { 
+            "dynamic": false,
+            "properties":{  
+                "origin": {  
+                    "type": "keyword"
+                },
+                "tag": {
+                    "type": "keyword"
+                }
+            }
+        }
+      }
+    }
+    """
+
+    def __init__(self, host, port, index, item_type=ITEM_TYPE, create=False):
         url = ':'.join([host, str(port)])
         super().__init__(url)
         self.conn = Elasticsearch([{'host': host, 'port': port}])
         self.index = index
+        self.item_type = item_type
 
         if not self.index:
             raise ElasticError
@@ -121,10 +140,18 @@ class ESConnector(Connector):
     def create_index(self):
         """Clean the index to work with"""
 
+        mapping = json.loads(ESConnector.MAPPING_TEMPLATE % self.item_type)
+
         if self.conn.indices.exists(index=self.index):
             res = self.conn.indices.delete(index=self.index)
 
-        self.conn.indices.create(index=self.index)
+            if not res['acknowledged']:
+                raise ElasticError(cause="Index not deleted")
+
+        res = self.conn.indices.create(index=self.index, body=mapping)
+
+        if not res['acknowledged']:
+            raise ElasticError(cause="Index not created")
 
     async def write(self, data_queue):
         """Write data to ElasticSearch"""
@@ -142,7 +169,7 @@ class ESConnector(Connector):
             items.append(item)
             data_queue.task_done()
 
-            if len(items) == BULK_SIZE:
+            if len(items) == ESConnector.BULK_SIZE:
                 self.__process_items(items)
                 items.clear()
 
@@ -156,7 +183,7 @@ class ESConnector(Connector):
         for item in items:
             es_item = {
                 '_index': self.index,
-                '_type': ITEM_TYPE,
+                '_type': self.item_type,
                 '_id': item['uuid'],
                 '_source': item
             }
